@@ -1,0 +1,5 @@
+rules:
+  - "DOMAIN-SUFFIX,whatismyipaddress.com,de"
+  - "IP-CIDR,10.0.0.0/8,DIRECT"
+  - "GEOIP,RU,DIRECT"
+  - "MATCH,DIRECT"

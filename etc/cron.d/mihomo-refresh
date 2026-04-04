@@ -1,0 +1,5 @@
+# Подписка + rules: mihomo-build-config и reload через API (без рестарта процесса).
+SHELL=/bin/sh
+PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
+
+* * * * * root /usr/local/sbin/mihomo-refresh

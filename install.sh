@@ -1,0 +1,135 @@
+#!/bin/bash
+set -euo pipefail
+
+MIHOMO_VERSION="v1.19.21"
+GITHUB_REPO="${GITHUB_REPO:-dewil/mihomo-install}"
+GITHUB_REF="${GITHUB_REF:-main}"
+INSTALL_SUBDIR="${INSTALL_SUBDIR:-mihomo-install}"
+ARCH=$(uname -m)
+case "$ARCH" in
+  x86_64)  ARCH_DL="amd64" ;;
+  aarch64) ARCH_DL="arm64" ;;
+  *)       echo "Unsupported arch: $ARCH"; exit 1 ;;
+esac
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+TMP_FETCH=""
+
+if [ "$(id -u)" -ne 0 ]; then
+  echo "Run as root (sudo)."
+  exit 1
+fi
+
+NOLOGIN_BIN="$(command -v nologin || true)"
+if [ -z "$NOLOGIN_BIN" ]; then
+  if [ -x /usr/sbin/nologin ]; then
+    NOLOGIN_BIN="/usr/sbin/nologin"
+  elif [ -x /sbin/nologin ]; then
+    NOLOGIN_BIN="/sbin/nologin"
+  else
+    echo "nologin binary not found."
+    exit 1
+  fi
+fi
+
+cleanup() {
+  [ -n "$TMP_FETCH" ] && rm -rf "$TMP_FETCH"
+}
+trap cleanup EXIT
+
+fetch_from_github() {
+  local rel="$1"
+  curl -fsSL "https://raw.githubusercontent.com/${GITHUB_REPO}/${GITHUB_REF}/${INSTALL_SUBDIR}/${rel}"
+}
+
+prepare_source_dir() {
+  if [ -d "${SCRIPT_DIR}/etc/mihomo" ] && [ -d "${SCRIPT_DIR}/usr/local/sbin" ]; then
+    echo "  -> using local files from ${SCRIPT_DIR}" >&2
+    echo "${SCRIPT_DIR}"
+    return
+  fi
+  TMP_FETCH="$(mktemp -d)"
+  mkdir -p "${TMP_FETCH}/etc/mihomo" "${TMP_FETCH}/etc/systemd/system" "${TMP_FETCH}/etc/cron.d" "${TMP_FETCH}/usr/local/sbin"
+
+  fetch_from_github "etc/mihomo/config.base.yaml" > "${TMP_FETCH}/etc/mihomo/config.base.yaml"
+  fetch_from_github "etc/mihomo/subscription.url" > "${TMP_FETCH}/etc/mihomo/subscription.url"
+  fetch_from_github "etc/mihomo/routing-rules.url" > "${TMP_FETCH}/etc/mihomo/routing-rules.url"
+  fetch_from_github "etc/mihomo/routing-rules.yaml" > "${TMP_FETCH}/etc/mihomo/routing-rules.yaml"
+  fetch_from_github "etc/mihomo/iso3166_alpha2.txt" > "${TMP_FETCH}/etc/mihomo/iso3166_alpha2.txt"
+  fetch_from_github "etc/systemd/system/mihomo.service" > "${TMP_FETCH}/etc/systemd/system/mihomo.service"
+  fetch_from_github "etc/cron.d/mihomo-refresh" > "${TMP_FETCH}/etc/cron.d/mihomo-refresh"
+  fetch_from_github "usr/local/sbin/mihomo-build-config" > "${TMP_FETCH}/usr/local/sbin/mihomo-build-config"
+  fetch_from_github "usr/local/sbin/mihomo-refresh" > "${TMP_FETCH}/usr/local/sbin/mihomo-refresh"
+
+  chmod 755 "${TMP_FETCH}/usr/local/sbin/mihomo-build-config" "${TMP_FETCH}/usr/local/sbin/mihomo-refresh"
+  echo "  -> files fetched from GitHub: ${GITHUB_REPO}@${GITHUB_REF}/${INSTALL_SUBDIR}" >&2
+  echo "${TMP_FETCH}"
+}
+
+SOURCE_DIR="$(prepare_source_dir)"
+
+echo "=== 1. Скачиваем mihomo ${MIHOMO_VERSION} (${ARCH_DL}) ==="
+TMP=$(mktemp -d)
+curl -fsSL "https://github.com/MetaCubeX/mihomo/releases/download/${MIHOMO_VERSION}/mihomo-linux-${ARCH_DL}-${MIHOMO_VERSION}.gz" \
+  -o "${TMP}/mihomo.gz"
+gunzip "${TMP}/mihomo.gz"
+install -m 755 "${TMP}/mihomo" /usr/local/bin/mihomo
+rm -rf "$TMP"
+echo "  -> /usr/local/bin/mihomo установлен"
+
+echo "=== 2. Создаём пользователя mihomo ==="
+if ! id mihomo &>/dev/null; then
+  useradd -r -s "$NOLOGIN_BIN" -d /etc/mihomo mihomo
+  echo "  -> пользователь mihomo создан"
+else
+  echo "  -> пользователь mihomo уже существует"
+fi
+
+echo "=== 3. Копируем конфигурацию ==="
+install -d -o root -g mihomo -m 750 /etc/mihomo
+install -d -o root -g mihomo -m 750 /etc/mihomo/providers
+
+for f in config.base.yaml subscription.url routing-rules.url routing-rules.yaml iso3166_alpha2.txt; do
+  install -o root -g mihomo -m 640 "${SOURCE_DIR}/etc/mihomo/${f}" "/etc/mihomo/${f}"
+done
+echo "  -> конфиги скопированы в /etc/mihomo/"
+
+echo "=== 4. Скачиваем GeoIP базу ==="
+if [ ! -f /etc/mihomo/geoip.metadb ]; then
+  curl -fsSL "https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/geoip.metadb" \
+    -o /etc/mihomo/geoip.metadb
+  echo "  -> geoip.metadb скачан"
+else
+  echo "  -> geoip.metadb уже есть"
+fi
+
+echo "=== 5. Устанавливаем скрипты ==="
+install -m 755 "${SOURCE_DIR}/usr/local/sbin/mihomo-build-config" /usr/local/sbin/mihomo-build-config
+install -m 755 "${SOURCE_DIR}/usr/local/sbin/mihomo-refresh"      /usr/local/sbin/mihomo-refresh
+echo "  -> скрипты установлены в /usr/local/sbin/"
+
+echo "=== 6. Устанавливаем systemd-сервис ==="
+install -m 644 "${SOURCE_DIR}/etc/systemd/system/mihomo.service" /etc/systemd/system/mihomo.service
+systemctl daemon-reload
+echo "  -> mihomo.service установлен"
+
+echo "=== 7. Устанавливаем cron ==="
+install -m 644 "${SOURCE_DIR}/etc/cron.d/mihomo-refresh" /etc/cron.d/mihomo-refresh
+if command -v systemctl >/dev/null 2>&1; then
+  if systemctl list-unit-files | awk '{print $1}' | grep -qx "cron.service"; then
+    systemctl enable --now cron >/dev/null 2>&1 || true
+  elif systemctl list-unit-files | awk '{print $1}' | grep -qx "crond.service"; then
+    systemctl enable --now crond >/dev/null 2>&1 || true
+  fi
+fi
+echo "  -> cron установлен (обновление подписки каждую минуту)"
+
+echo "=== 8. Запускаем ==="
+systemctl enable mihomo
+systemctl start mihomo
+echo "  -> mihomo запущен и включён в автозагрузку"
+
+echo ""
+echo "Готово! Проверка: systemctl status mihomo"
+echo "Логи:    journalctl -u mihomo -f"
+echo "API:     curl http://127.0.0.1:9090"

@@ -1,0 +1,24 @@
+[Unit]
+Description=Mihomo (Clash Meta) proxy
+Documentation=https://wiki.metacubex.one/
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=mihomo
+Group=mihomo
+WorkingDirectory=/etc/mihomo
+ExecStartPre=+/usr/local/sbin/mihomo-build-config
+ExecStart=/usr/local/bin/mihomo -d /etc/mihomo
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=1048576
+# TUN: создание интерфейса и маршруты (ip rule / nftables)
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
+NoNewPrivileges=false
+PrivateDevices=false
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,44 @@
+#!/bin/bash
+# Пересобирает config.yaml (подписка + rules) и подгружает его в работающий Mihomo без рестарта (PUT /configs).
+set -euo pipefail
+
+/usr/local/sbin/mihomo-build-config
+
+API="${MIHOMO_API:-http://127.0.0.1:9090}"
+CFG="/etc/mihomo/config.yaml"
+
+AUTH=()
+if [[ -f "$CFG" ]]; then
+  SEC=$(
+    python3 <<'PY'
+import pathlib
+p = pathlib.Path("/etc/mihomo/config.yaml")
+if not p.is_file():
+    raise SystemExit(0)
+for line in p.read_text(encoding="utf-8", errors="replace").splitlines():
+    s = line.split("#", 1)[0].strip()
+    if not s.startswith("secret:"):
+        continue
+    rest = s[len("secret:") :].strip()
+    if not rest:
+        print("", end="")
+        break
+    if (rest.startswith('"') and rest.endswith('"')) or (
+        rest.startswith("'") and rest.endswith("'")
+    ):
+        print(rest[1:-1], end="")
+    else:
+        print(rest, end="")
+    break
+PY
+  )
+  if [[ -n "${SEC}" ]]; then
+    AUTH=(-H "Authorization: Bearer ${SEC}")
+  fi
+fi
+
+BODY=$(CFG="$CFG" python3 -c 'import json, os; print(json.dumps({"path": os.environ["CFG"]}))')
+curl -fsS -X PUT "${API}/configs?force=true" \
+  "${AUTH[@]}" \
+  -H "Content-Type: application/json" \
+  -d "$BODY"

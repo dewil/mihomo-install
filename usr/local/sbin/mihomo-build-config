@@ -1,0 +1,365 @@
+#!/usr/bin/env python3
+"""
+Скачивает подписку, сопоставляет узлы с алиасами (ISO 3166-1 alpha-2: xx, xx2, xx3),
+собирает /etc/mihomo/config.yaml из config.base.yaml + сгенерированные proxy-providers/groups/rules.
+"""
+from __future__ import annotations
+
+import base64
+import json
+import pathlib
+import re
+import subprocess
+import sys
+from typing import Dict, List, Set, Tuple
+from urllib.parse import unquote, urlparse
+
+BASE = pathlib.Path("/etc/mihomo")
+SUB_URL = BASE / "subscription.url"
+PROVIDER_FILE = BASE / "providers" / "vless_sub.yaml"
+BASE_CFG = BASE / "config.base.yaml"
+ROUTING_RULES = BASE / "routing-rules.yaml"
+ROUTING_RULES_URL = BASE / "routing-rules.url"
+ISO_CODES = BASE / "iso3166_alpha2.txt"
+ALIASES_OUT = BASE / "aliases.yaml"
+OUT_CFG = BASE / "config.yaml"
+
+BUILTIN_POLICIES = frozenset(
+    {
+        "DIRECT",
+        "REJECT",
+        "REJECT-DROP",
+        "PASS",
+        "COMPATIBLE",
+        "GLOBAL",
+        "PROXY",
+    }
+)
+
+
+def _read_subscription_url() -> str:
+    if not SUB_URL.is_file():
+        print("Нет /etc/mihomo/subscription.url", file=sys.stderr)
+        sys.exit(1)
+    lines = []
+    for ln in SUB_URL.read_text(encoding="utf-8").splitlines():
+        s = ln.strip()
+        if not s or s.startswith("#"):
+            continue
+        lines.append(s)
+    if not lines:
+        print("Пустой subscription.url", file=sys.stderr)
+        sys.exit(1)
+    url = lines[0]
+    if "REPLACE_WITH" in url or "YOUR_SUBSCRIPTION" in url:
+        print("Замените placeholder в subscription.url на реальный URL.", file=sys.stderr)
+        sys.exit(1)
+    return url
+
+
+def _download_subscription(url: str) -> None:
+    tmp = PROVIDER_FILE.with_suffix(".tmp")
+    try:
+        subprocess.run(
+            [
+                "curl",
+                "-fsSL",
+                "--connect-timeout",
+                "20",
+                "--max-time",
+                "120",
+                "-o",
+                str(tmp),
+                url,
+            ],
+            check=True,
+        )
+    except subprocess.CalledProcessError as e:
+        print(f"Не удалось скачать подписку: {e}", file=sys.stderr)
+        sys.exit(1)
+    tmp.replace(PROVIDER_FILE)
+    subprocess.run(["chown", "root:mihomo", str(PROVIDER_FILE)], check=False)
+    subprocess.run(["chmod", "640", str(PROVIDER_FILE)], check=False)
+
+
+def _read_routing_rules_url() -> str | None:
+    """URL для скачивания routing-rules.yaml; None — только локальный файл."""
+    if not ROUTING_RULES_URL.is_file():
+        return None
+    lines = []
+    for ln in ROUTING_RULES_URL.read_text(encoding="utf-8").splitlines():
+        s = ln.strip()
+        if not s or s.startswith("#"):
+            continue
+        lines.append(s)
+    return lines[0] if lines else None
+
+
+def _download_routing_rules(url: str) -> bool:
+    """Сохраняет ответ в routing-rules.yaml. False при ошибке (оставляем старый файл)."""
+    tmp = ROUTING_RULES.with_suffix(".yaml.tmp")
+    try:
+        subprocess.run(
+            [
+                "curl",
+                "-fsSL",
+                "--connect-timeout",
+                "15",
+                "--max-time",
+                "60",
+                "-o",
+                str(tmp),
+                url,
+            ],
+            check=True,
+        )
+    except subprocess.CalledProcessError as e:
+        print(f"Не удалось скачать правила с {url!r}: {e}", file=sys.stderr)
+        tmp.unlink(missing_ok=True)
+        return False
+    text = tmp.read_text(encoding="utf-8", errors="replace")
+    if "rules:" not in text:
+        print(
+            "Ответ по routing-rules.url не содержит 'rules:', откат к прежнему файлу.",
+            file=sys.stderr,
+        )
+        tmp.unlink(missing_ok=True)
+        return False
+    tmp.replace(ROUTING_RULES)
+    subprocess.run(["chown", "root:mihomo", str(ROUTING_RULES)], check=False)
+    subprocess.run(["chmod", "640", str(ROUTING_RULES)], check=False)
+    return True
+
+
+def _name_from_vless(uri: str) -> str:
+    p = urlparse(uri.strip())
+    frag = unquote(p.fragment) if p.fragment else ""
+    return frag.strip() or uri[:80]
+
+
+def _extract_proxy_names(raw: bytes) -> List[str]:
+    text = raw.decode("utf-8", "replace").strip()
+    names: List[str] = []
+    seen: Set[str] = set()
+
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        chunk = line
+        if not line.startswith("vless:"):
+            try:
+                pad = len(line) % 4
+                if pad:
+                    line += "=" * (4 - pad)
+                dec = base64.b64decode(line, validate=False).decode("utf-8", "replace")
+                chunk = dec
+            except Exception:
+                chunk = line
+
+        for part in chunk.splitlines():
+            part = part.strip()
+            if not part.startswith("vless:"):
+                continue
+            n = _name_from_vless(part)
+            if n and n not in seen:
+                seen.add(n)
+                names.append(n)
+        if line.startswith("vless:"):
+            n = _name_from_vless(line)
+            if n and n not in seen:
+                seen.add(n)
+                names.append(n)
+    return names
+
+
+def _load_iso_codes() -> List[str]:
+    if not ISO_CODES.is_file():
+        print("Нет /etc/mihomo/iso3166_alpha2.txt", file=sys.stderr)
+        sys.exit(1)
+    codes = []
+    for ln in ISO_CODES.read_text(encoding="utf-8").splitlines():
+        c = ln.strip().lower()
+        if len(c) == 2 and c.isalpha():
+            codes.append(c)
+    return sorted(set(codes))
+
+
+def _build_alias_regexes(codes: List[str]) -> Dict[str, str]:
+    """Ключи: nl, nl2, nl3. \\b, чтобы HU не матчил 'hub' и т.п."""
+    out: Dict[str, str] = {}
+    for c in codes:
+        U = c.upper()
+        out[f"{c}3"] = rf"(?i)\b{U}3\b"
+        out[f"{c}2"] = rf"(?i)\b{U}2\b"
+        out[c] = rf"(?i)\b{U}\b"
+    return out
+
+
+def _alias_sort_key(key: str) -> Tuple[str, int]:
+    m = re.fullmatch(r"([a-z]{2})(\d*)", key)
+    if not m:
+        return (key, -1)
+    base, suf = m.group(1), m.group(2)
+    suf_n = int(suf) if suf else 0
+    return (base, -suf_n)
+
+
+def _assign_aliases(
+    proxies: List[str], aliases: Dict[str, str]
+) -> Dict[str, str]:
+    """alias_key -> имя прокси из подписки (один узел на алиас максимум)."""
+    keys = sorted(aliases.keys(), key=_alias_sort_key)
+    used: Set[str] = set()
+    assigned: Dict[str, str] = {}
+    for alias in keys:
+        pat = aliases[alias]
+        rx = re.compile(pat)
+        for p in proxies:
+            if p in used:
+                continue
+            if rx.search(p):
+                assigned[alias] = p
+                used.add(p)
+                break
+    return assigned
+
+
+def _load_routing_rules() -> List[str]:
+    if not ROUTING_RULES.is_file():
+        return ["MATCH,DIRECT"]
+    text = ROUTING_RULES.read_text(encoding="utf-8")
+    rules: List[str] = []
+    in_rules = False
+    for line in text.splitlines():
+        s = line.strip()
+        if s.startswith("rules:"):
+            in_rules = True
+            continue
+        if not in_rules:
+            continue
+        if s.startswith("- "):
+            r = s[2:].strip()
+            if (r.startswith('"') and r.endswith('"')) or (r.startswith("'") and r.endswith("'")):
+                r = r[1:-1]
+            rules.append(r)
+    if not rules:
+        rules = ["MATCH,DIRECT"]
+    return rules
+
+
+def _rule_policy(rule: str) -> str | None:
+    if rule.upper().startswith("MATCH"):
+        return None
+    parts = rule.split(",", 2)
+    if len(parts) < 3:
+        return None
+    return parts[2].strip().strip('"').strip("'")
+
+
+def _emit_aliases_yaml(aliases: Dict[str, str]) -> None:
+    lines = [
+        "# Автогенерация: ISO alpha-2 × варианты 2/3. Редактировать iso3166_alpha2.txt при необходимости.",
+        "",
+    ]
+    for k in sorted(aliases.keys(), key=_alias_sort_key):
+        lines.append(f"{k}:")
+        lines.append(f'    match: "{aliases[k]}"')
+        lines.append("")
+    ALIASES_OUT.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+    subprocess.run(["chown", "root:mihomo", str(ALIASES_OUT)], check=False)
+    subprocess.run(["chmod", "640", str(ALIASES_OUT)], check=False)
+
+
+def _yaml_escape_filter(name: str) -> str:
+    return re.escape(name)
+
+
+def _build_generated(
+    assigned: Dict[str, str],
+    rules: List[str],
+    aliases: Dict[str, str],
+) -> str:
+    referenced: Set[str] = set()
+    for r in rules:
+        pol = _rule_policy(r)
+        if pol and pol not in BUILTIN_POLICIES:
+            referenced.add(pol)
+
+    # Группы с реальным узлом
+    blocks_pp: List[str] = []
+    blocks_pg: List[str] = []
+    for alias, pname in sorted(assigned.items(), key=lambda x: _alias_sort_key(x[0])):
+        prov = re.sub(r"[^a-zA-Z0-9_]", "_", f"sub_{alias}")
+        flt = _yaml_escape_filter(pname)
+        blocks_pp.append(
+            f"""  {prov}:
+    type: file
+    path: ./providers/vless_sub.yaml
+    filter: "{flt}"
+    health-check:
+      enable: true
+      url: https://www.gstatic.com/generate_204
+      interval: 600
+"""
+        )
+        blocks_pg.append(
+            f"""  - name: {alias}
+    type: select
+    use:
+      - {prov}
+"""
+        )
+
+    # Заглушки: в rules указан алиас, но в подписке нет подходящего узла
+    for pol in sorted(referenced):
+        if pol in BUILTIN_POLICIES:
+            continue
+        if pol in assigned:
+            continue
+        blocks_pg.append(
+            f"""  - name: {pol}
+    type: select
+    proxies:
+      - DIRECT
+"""
+        )
+
+    rules_lines = ["rules:"]
+    for r in rules:
+        rules_lines.append(f"  - {json.dumps(r, ensure_ascii=False)}")
+
+    pp = "proxy-providers:\n" + "\n".join(blocks_pp) if blocks_pp else "proxy-providers: {}"
+    pg = "proxy-groups:\n" + "\n".join(blocks_pg) if blocks_pg else "proxy-groups: []"
+    parts = [pp, pg, "\n".join(rules_lines)]
+    return "\n".join(parts) + "\n"
+
+
+def main() -> int:
+    url = _read_subscription_url()
+    _download_subscription(url)
+    rules_url = _read_routing_rules_url()
+    if rules_url:
+        if not _download_routing_rules(rules_url):
+            print(
+                "Используется существующий /etc/mihomo/routing-rules.yaml (если есть).",
+                file=sys.stderr,
+            )
+    raw = PROVIDER_FILE.read_bytes()
+    proxies = _extract_proxy_names(raw)
+    codes = _load_iso_codes()
+    aliases = _build_alias_regexes(codes)
+    _emit_aliases_yaml(aliases)
+    assigned = _assign_aliases(proxies, aliases)
+    rules = _load_routing_rules()
+    gen = _build_generated(assigned, rules, aliases)
+
+    base = BASE_CFG.read_text(encoding="utf-8").rstrip() + "\n\n"
+    OUT_CFG.write_text(base + gen, encoding="utf-8")
+    subprocess.run(["chown", "root:mihomo", str(OUT_CFG)], check=False)
+    subprocess.run(["chmod", "640", str(OUT_CFG)], check=False)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
