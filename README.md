@@ -17,21 +17,14 @@ sudo ./install.sh
 ## Установка прямо с GitHub
 
 ```bash
-wget -qO- https://raw.githubusercontent.com/<owner>/<repo>/main/mihomo-install/install.sh | \
-  sudo bash
-```
-
-Для вашего репозитория:
-
-```bash
-wget -qO- https://raw.githubusercontent.com/dewil/mihomo-install/main/mihomo-install/install.sh | sudo bash
+wget -qO- https://raw.githubusercontent.com/dewil/mihomo-install/main/install.sh | sudo bash
 ```
 
 Если ветка/путь отличается:
 
 ```bash
-wget -qO- https://raw.githubusercontent.com/<owner>/<repo>/<branch>/mihomo-install/install.sh | \
-  sudo GITHUB_REPO="<owner>/<repo>" GITHUB_REF="<branch>" INSTALL_SUBDIR="mihomo-install" bash
+wget -qO- https://raw.githubusercontent.com/<owner>/<repo>/<branch>/install.sh | \
+  sudo GITHUB_REPO="<owner>/<repo>" GITHUB_REF="<branch>" INSTALL_SUBDIR="" bash
 ```
 
 ## Что делает install.sh
@@ -87,7 +80,7 @@ wget -qO- https://raw.githubusercontent.com/<owner>/<repo>/<branch>/mihomo-insta
 
 - `GITHUB_REPO` — `owner/repo`
 - `GITHUB_REF` — ветка или тег (по умолчанию `main`)
-- `INSTALL_SUBDIR` — папка установки в репозитории (по умолчанию `mihomo-install`)
+- `INSTALL_SUBDIR` — подпапка установки в репозитории (по умолчанию пусто, корень репо)
 
 ## Управление
 

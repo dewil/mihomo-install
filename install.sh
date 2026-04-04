@@ -4,7 +4,7 @@ set -euo pipefail
 MIHOMO_VERSION="v1.19.21"
 GITHUB_REPO="${GITHUB_REPO:-dewil/mihomo-install}"
 GITHUB_REF="${GITHUB_REF:-main}"
-INSTALL_SUBDIR="${INSTALL_SUBDIR:-mihomo-install}"
+INSTALL_SUBDIR="${INSTALL_SUBDIR:-}"
 ARCH=$(uname -m)
 case "$ARCH" in
   x86_64)  ARCH_DL="amd64" ;;
@@ -37,9 +37,24 @@ cleanup() {
 }
 trap cleanup EXIT
 
+build_raw_base_url() {
+  local base="https://raw.githubusercontent.com/${GITHUB_REPO}/${GITHUB_REF}"
+  if [ -n "${INSTALL_SUBDIR}" ] && [ "${INSTALL_SUBDIR}" != "." ]; then
+    base="${base}/${INSTALL_SUBDIR}"
+  fi
+  echo "${base}"
+}
+
 fetch_from_github() {
   local rel="$1"
-  curl -fsSL "https://raw.githubusercontent.com/${GITHUB_REPO}/${GITHUB_REF}/${INSTALL_SUBDIR}/${rel}"
+  local dst="$2"
+  local base
+  base="$(build_raw_base_url)"
+  curl -fsSL "${base}/${rel}" -o "${dst}"
+  if [ ! -s "${dst}" ]; then
+    echo "Downloaded file is empty: ${rel}" >&2
+    exit 1
+  fi
 }
 
 prepare_source_dir() {
@@ -51,18 +66,22 @@ prepare_source_dir() {
   TMP_FETCH="$(mktemp -d)"
   mkdir -p "${TMP_FETCH}/etc/mihomo" "${TMP_FETCH}/etc/systemd/system" "${TMP_FETCH}/etc/cron.d" "${TMP_FETCH}/usr/local/sbin"
 
-  fetch_from_github "etc/mihomo/config.base.yaml" > "${TMP_FETCH}/etc/mihomo/config.base.yaml"
-  fetch_from_github "etc/mihomo/subscription.url" > "${TMP_FETCH}/etc/mihomo/subscription.url"
-  fetch_from_github "etc/mihomo/routing-rules.url" > "${TMP_FETCH}/etc/mihomo/routing-rules.url"
-  fetch_from_github "etc/mihomo/routing-rules.yaml" > "${TMP_FETCH}/etc/mihomo/routing-rules.yaml"
-  fetch_from_github "etc/mihomo/iso3166_alpha2.txt" > "${TMP_FETCH}/etc/mihomo/iso3166_alpha2.txt"
-  fetch_from_github "etc/systemd/system/mihomo.service" > "${TMP_FETCH}/etc/systemd/system/mihomo.service"
-  fetch_from_github "etc/cron.d/mihomo-refresh" > "${TMP_FETCH}/etc/cron.d/mihomo-refresh"
-  fetch_from_github "usr/local/sbin/mihomo-build-config" > "${TMP_FETCH}/usr/local/sbin/mihomo-build-config"
-  fetch_from_github "usr/local/sbin/mihomo-refresh" > "${TMP_FETCH}/usr/local/sbin/mihomo-refresh"
+  fetch_from_github "etc/mihomo/config.base.yaml" "${TMP_FETCH}/etc/mihomo/config.base.yaml"
+  fetch_from_github "etc/mihomo/subscription.url" "${TMP_FETCH}/etc/mihomo/subscription.url"
+  fetch_from_github "etc/mihomo/routing-rules.url" "${TMP_FETCH}/etc/mihomo/routing-rules.url"
+  fetch_from_github "etc/mihomo/routing-rules.yaml" "${TMP_FETCH}/etc/mihomo/routing-rules.yaml"
+  fetch_from_github "etc/mihomo/iso3166_alpha2.txt" "${TMP_FETCH}/etc/mihomo/iso3166_alpha2.txt"
+  fetch_from_github "etc/systemd/system/mihomo.service" "${TMP_FETCH}/etc/systemd/system/mihomo.service"
+  fetch_from_github "etc/cron.d/mihomo-refresh" "${TMP_FETCH}/etc/cron.d/mihomo-refresh"
+  fetch_from_github "usr/local/sbin/mihomo-build-config" "${TMP_FETCH}/usr/local/sbin/mihomo-build-config"
+  fetch_from_github "usr/local/sbin/mihomo-refresh" "${TMP_FETCH}/usr/local/sbin/mihomo-refresh"
 
   chmod 755 "${TMP_FETCH}/usr/local/sbin/mihomo-build-config" "${TMP_FETCH}/usr/local/sbin/mihomo-refresh"
-  echo "  -> files fetched from GitHub: ${GITHUB_REPO}@${GITHUB_REF}/${INSTALL_SUBDIR}" >&2
+  local source_suffix="/"
+  if [ -n "${INSTALL_SUBDIR}" ] && [ "${INSTALL_SUBDIR}" != "." ]; then
+    source_suffix="/${INSTALL_SUBDIR}/"
+  fi
+  echo "  -> files fetched from GitHub: ${GITHUB_REPO}@${GITHUB_REF}${source_suffix}" >&2
   echo "${TMP_FETCH}"
 }
 
