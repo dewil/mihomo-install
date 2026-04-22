@@ -127,12 +127,30 @@ install -m 755 "${SOURCE_DIR}/usr/local/sbin/mihomo-build-config" /usr/local/sbi
 install -m 755 "${SOURCE_DIR}/usr/local/sbin/mihomo-refresh"      /usr/local/sbin/mihomo-refresh
 echo "  -> скрипты установлены в /usr/local/sbin/"
 
-echo "=== 6. Устанавливаем systemd-сервис ==="
+echo "=== 6. Запрашиваем ссылки у пользователя ==="
+read -r -p "Введите ссылку на подписку (subscription.url): " SUBSCRIPTION_URL
+if [ -z "${SUBSCRIPTION_URL}" ]; then
+  echo "Пустая ссылка на подписку. Установка прервана."
+  exit 1
+fi
+printf '%s\n' "${SUBSCRIPTION_URL}" > /etc/mihomo/subscription.url
+
+read -r -p "Введите ссылку на обновление маршрутов (routing-rules.url): " ROUTING_RULES_URL
+if [ -z "${ROUTING_RULES_URL}" ]; then
+  echo "Пустая ссылка на маршруты. Установка прервана."
+  exit 1
+fi
+printf '%s\n' "${ROUTING_RULES_URL}" > /etc/mihomo/routing-rules.url
+chown root:mihomo /etc/mihomo/subscription.url /etc/mihomo/routing-rules.url
+chmod 640 /etc/mihomo/subscription.url /etc/mihomo/routing-rules.url
+echo "  -> ссылки сохранены в /etc/mihomo/"
+
+echo "=== 7. Устанавливаем systemd-сервис ==="
 install -m 644 "${SOURCE_DIR}/etc/systemd/system/mihomo.service" /etc/systemd/system/mihomo.service
 systemctl daemon-reload
 echo "  -> mihomo.service установлен"
 
-echo "=== 7. Устанавливаем cron ==="
+echo "=== 8. Устанавливаем cron ==="
 install -m 644 "${SOURCE_DIR}/etc/cron.d/mihomo-refresh" /etc/cron.d/mihomo-refresh
 if command -v systemctl >/dev/null 2>&1; then
   if systemctl list-unit-files | awk '{print $1}' | grep -qx "cron.service"; then
@@ -143,7 +161,7 @@ if command -v systemctl >/dev/null 2>&1; then
 fi
 echo "  -> cron установлен (обновление подписки каждую минуту)"
 
-echo "=== 8. Запускаем ==="
+echo "=== 9. Запускаем ==="
 systemctl enable mihomo
 systemctl start mihomo
 echo "  -> mihomo запущен и включён в автозагрузку"
