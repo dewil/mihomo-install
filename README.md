@@ -9,6 +9,8 @@
 - curl, python3
 - systemd
 
+Про x86_64: официальный релиз mihomo для amd64 требует микроархитектуру **x86-64-v3** (AVX2, BMI2, FMA) и на процессорах ниже этого уровня не стартует вовсе - падает с `This program can only be run on AMD64 processors with v3 microarchitecture support`, а systemd уходит в бесконечный рестарт. `install.sh` определяет уровень сам и на таких машинах ставит сборку `amd64-compatible`. Проверить вручную: `ld.so --help | grep x86-64-v3`.
+
 ## Быстрая установка
 
 ```bash

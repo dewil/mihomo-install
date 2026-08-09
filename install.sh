@@ -12,6 +12,31 @@ case "$ARCH" in
   *)       echo "Unsupported arch: $ARCH"; exit 1 ;;
 esac
 
+# Релиз mihomo для amd64 собран под микроархитектуру x86-64-v3 (AVX2, BMI2, FMA).
+# На процессоре ниже этого уровня бинарь не стартует вовсе: "This program can only
+# be run on AMD64 processors with v3 microarchitecture support", и systemd уходит
+# в бесконечный рестарт. Для таких машин upstream публикует сборку -compatible.
+# Всплыло на домашней ноде (Celeron J1900, x86-64-v2); на серверных CPU не видно.
+supports_x86_64_v3() {
+  local ldso
+  for ldso in /lib64/ld-linux-x86-64.so.2 /lib/x86_64-linux-gnu/ld-linux-x86-64.so.2; do
+    [ -x "$ldso" ] || continue
+    # glibc 2.33+ перечисляет поддерживаемые уровни в --help
+    if "$ldso" --help 2>/dev/null | grep -q 'x86-64-v3 (supported)'; then
+      return 0
+    fi
+    if "$ldso" --help 2>/dev/null | grep -q 'x86-64-v[0-9] (supported)'; then
+      return 1   # ld.so ответил, но v3 в списке нет
+    fi
+  done
+  # Старая glibc: решаем по флагам CPU - три из набора v3 достаточно показательны
+  grep -qw avx2 /proc/cpuinfo && grep -qw bmi2 /proc/cpuinfo && grep -qw fma /proc/cpuinfo
+}
+
+if [ "$ARCH_DL" = "amd64" ] && ! supports_x86_64_v3; then
+  ARCH_DL="amd64-compatible"
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 TMP_FETCH=""
 
