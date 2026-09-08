@@ -16,7 +16,9 @@ import sys
 from typing import Any, Dict, List, Optional, Set, Tuple
 from urllib.parse import parse_qs, unquote, urlparse
 
-BASE = pathlib.Path("/etc/mihomo")
+# Путь переопределяется только ради прогона в песочнице: без него ветку
+# "политика без узла" нельзя проверить, не трогая боевой /etc/mihomo.
+BASE = pathlib.Path(os.environ.get("MIHOMO_BASE", "/etc/mihomo"))
 SUB_URL = BASE / "subscription.url"
 # Пол по составу узлов: подписка, внезапно отдавшая заметно меньше узлов, чем в
 # прошлый раз, скорее всего просто не достучалась до части нод - применять такое
@@ -558,6 +560,51 @@ def _emit_aliases_yaml(aliases: Dict[str, str]) -> None:
     subprocess.run(["chmod", "640", str(ALIASES_OUT)], check=False)
 
 
+def _check_orphan_policies(orphans: List[str]) -> None:
+    """Политика упомянута в правилах, а узла под нее в подписке нет.
+
+    Раньше на такую политику собиралась группа-заглушка с DIRECT, и трафик,
+    которому положено идти через выход, уходил прямым адресом ноды - молча, до
+    возвращения узла в подписку. Снаружи это выглядело как случайные отказы
+    сервисов, привязанных к стране (Anthropic отвечает 403 на запрос из
+    дата-центра), а в журнале не было ничего.
+
+    Пол по составу узлов от этого не защищает: он ловит обвал списка, а потеря
+    одного узла из двенадцати проходит порог 0.7 беспрепятственно.
+
+    Развилка тут не "DIRECT или REJECT", а "есть ли что оставить в работе":
+
+    - предыдущий config.yaml есть - отменяем сборку (код 3). В работе остается
+      конфиг, собранный когда узлы были на месте, то есть сервис продолжает
+      работать. Одиночный промах агрегатора не должен ничего ронять;
+    - предыдущего конфига нет (первая установка, сборка после отката) -
+      отменять нечего, и тогда собираем с заглушкой REJECT. Трафик отклоняется
+      заметно, но прямым выходом не уходит.
+    """
+    names = ", ".join(orphans)
+    if OUT_CFG.is_file() and not ALLOW_SHRINK:
+        print(
+            f"В правилах есть политики без узла в подписке: {names}. "
+            "Сборка отменена, в работе остается предыдущий config.yaml. "
+            "Если сокращение штатное (ноду вывели специально): "
+            "MIHOMO_ALLOW_SHRINK=1 /usr/local/sbin/mihomo-refresh",
+            file=sys.stderr,
+        )
+        sys.exit(3)
+
+    reason = (
+        "MIHOMO_ALLOW_SHRINK"
+        if ALLOW_SHRINK
+        else f"предыдущего {OUT_CFG.name} нет - отменять нечего"
+    )
+    print(
+        f"Политики без узла в подписке: {names} ({reason}). "
+        "Собираю с заглушкой REJECT: трафик этих политик будет отклонен, "
+        "но прямым выходом не уйдет.",
+        file=sys.stderr,
+    )
+
+
 def _build_generated(
     proxies: List[Dict[str, Any]],
     assigned: Dict[str, str],
@@ -595,17 +642,23 @@ def _build_generated(
 """
         )
 
-    # Заглушки: в rules указан алиас, но в подписке нет подходящего узла
-    for pol in sorted(referenced):
-        if pol in BUILTIN_POLICIES:
-            continue
-        if pol in assigned:
-            continue
+    # Политики, упомянутые в правилах, для которых узла в подписке не нашлось.
+    # Алиасы, которых нет в правилах, сюда не попадают и сборку не блокируют:
+    # группа fi, на которую никто не ссылается, - не повод останавливать ноду.
+    orphans = [
+        pol
+        for pol in sorted(referenced)
+        if pol not in BUILTIN_POLICIES and pol not in assigned
+    ]
+    if orphans:
+        # Может не вернуться: при живом предыдущем конфиге выходит с кодом 3.
+        _check_orphan_policies(orphans)
+    for pol in orphans:
         blocks_pg.append(
             f"""  - name: {pol}
     type: select
     proxies:
-      - DIRECT
+      - REJECT
 """
         )
 
