@@ -22,6 +22,28 @@ fail() {
   exit 1
 }
 
+# Повторяющиеся сообщения сборщика глушим: он печатает свои замечания на КАЖДОМ
+# прогоне, а прогон идет раз в минуту. Без этого одна и та же строка ("листенеры
+# без группы убраны", "политика без узла") дает 1440 записей в сутки и топит в
+# себе первое настоящее событие. Логируем, когда текст изменился или когда с
+# прошлой записи того же текста прошло больше LOG_REPEAT_SEC.
+LOG_STATE="/run/mihomo-refresh.lastlog"
+LOG_REPEAT_SEC="${MIHOMO_LOG_REPEAT_SEC:-1800}"
+
+log_once() {
+  local prio="$1" text="$2" sig now prev_sig prev_ts
+  sig="$(printf '%s' "$text" | md5sum | awk '{print $1}')"
+  now="$(date +%s)"
+  if [[ -f "$LOG_STATE" ]]; then
+    read -r prev_sig prev_ts < "$LOG_STATE" || true
+    if [[ "$sig" == "$prev_sig" ]] && (( now - ${prev_ts:-0} < LOG_REPEAT_SEC )); then
+      return 0
+    fi
+  fi
+  printf '%s %s\n' "$sig" "$now" > "$LOG_STATE" || true
+  logger -t mihomo-refresh -p "$prio" -- "$text" || true
+}
+
 hash_of() {
   [[ -f "$1" ]] || { echo ""; return; }
   md5sum "$1" | awk '{print $1}'
@@ -53,8 +75,7 @@ if [[ $RC -ne 0 ]]; then
   # подписка усохла ниже порога, либо политика из правил осталась без узла.
   # Конфиг при этом не тронут, в работе остается предыдущий.
   if [[ $RC -eq 3 ]]; then
-    logger -t mihomo-refresh -p daemon.warning -- \
-      "сборка отменена (код 3): ${BUILD_OUT//$'\n'/ | }" || true
+    log_once daemon.warning "сборка отменена (код 3): ${BUILD_OUT//$'\n'/ | }"
     exit 0
   fi
   fail "mihomo-build-config упал с кодом ${RC}: ${BUILD_OUT//$'\n'/ | }"
@@ -64,7 +85,7 @@ fi
 # порог не нарушен". Это ранний признак будущей потери, и он должен быть виден
 # в журнале, а не только в терминале того, кто запускал руками.
 if [[ -n "$BUILD_OUT" ]]; then
-  logger -t mihomo-refresh -p daemon.notice -- "сборщик: ${BUILD_OUT//$'\n'/ | }" || true
+  log_once daemon.notice "сборщик: ${BUILD_OUT//$'\n'/ | }"
 fi
 
 NEW_HASH="$(hash_of "$CFG")"
